@@ -19,7 +19,6 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
-#include <sys/sysinfo.h>
 #include <ctype.h>
 #include <stdarg.h>
 
@@ -108,7 +107,7 @@ typedef struct
 
 Theme AppTheme;
 
-#define MAX_POSSIBLE_WALLPAPERS 2048
+#define MAX_POSSIBLE_WALLPAPERS 32768
 #define MAX_POSSIBLE_PARTICLES 256
 #define MAX_TEXTURES_TO_LOAD_PER_FRAME 4
 
@@ -121,6 +120,14 @@ int g_max_fps;
 float g_anim_speed;
 float g_ken_burns_duration;
 float g_border_thickness_bloom;
+int g_min_width;
+int g_min_height;
+
+typedef enum {
+    APPLY_ALL_DESKTOPS = 0,
+    APPLY_CURRENT_SPACE = 1
+} ApplyMode;
+static ApplyMode g_applyMode = APPLY_ALL_DESKTOPS;
 
 typedef enum {
     MODE_GRID = 0,
@@ -297,7 +304,40 @@ void TriggerParticleBurst(Vector2 pos)
 
 static Image LoadThumbnailImage(const char *fp)
 {
-    Image i = LoadImage(fp);
+    Image i = {0};
+    const char *ext = strrchr(fp, '.');
+#ifdef __APPLE__
+    bool needsConvert = false;
+    if (ext)
+    {
+        if (strcasecmp(ext, ".heic") == 0 || strcasecmp(ext, ".heif") == 0 || strcasecmp(ext, ".webp") == 0)
+        {
+            needsConvert = true;
+        }
+    }
+    if (needsConvert)
+    {
+        char tmpPath[4096];
+        snprintf(tmpPath, sizeof(tmpPath), "/tmp/setwall_thumb_%u.png", (unsigned int)rand());
+        char cmd[8192];
+        // Use sips to convert to PNG for thumbnail generation
+        snprintf(cmd, sizeof(cmd), "sips -s format png %s --out %s >/dev/null 2>&1", fp, tmpPath);
+        int rc = system(cmd);
+        if (rc == 0)
+        {
+            i = LoadImage(tmpPath);
+            unlink(tmpPath);
+        }
+        else
+        {
+            LogMessage(LOG_WARNING, "sips conversion failed for: %s", fp);
+        }
+    }
+    else
+#endif
+    {
+        i = LoadImage(fp);
+    }
     if (i.data)
     {
         int cs = (i.width < i.height) ? i.width : i.height;
@@ -319,7 +359,36 @@ static Image LoadThumbnailImage(const char *fp)
 
 void *FullPreviewLoaderThread(void* p)
 {
-    Image i = LoadImage((const char*)p);
+    const char *fp = (const char*)p;
+    Image i = {0};
+#ifdef __APPLE__
+    const char *ext = strrchr(fp, '.');
+    bool needsConvert = false;
+    if (ext)
+    {
+        if (strcasecmp(ext, ".webp") == 0)
+        {
+            needsConvert = true;
+        }
+        // HEIC is supported by macOS as wallpaper, so we won't convert for full preview unless LoadImage fails
+    }
+    if (needsConvert)
+    {
+        char tmpPath[4096];
+        snprintf(tmpPath, sizeof(tmpPath), "/tmp/setwall_full_%u.png", (unsigned int)rand());
+        char cmd[8192];
+        snprintf(cmd, sizeof(cmd), "sips -s format png %s --out %s >/dev/null 2>&1", fp, tmpPath);
+        if (system(cmd) == 0)
+        {
+            i = LoadImage(tmpPath);
+            unlink(tmpPath);
+        }
+    }
+    if (!i.data)
+#endif
+    {
+        i = LoadImage(fp);
+    }
     if (i.data)
     {
         pendingFullImage = i;
@@ -376,7 +445,7 @@ EffectType ParseEffect(const char* arg)
     return EFFECT_NONE;
 }
 
-static void LoadWallpapers(const char *dir)
+static void LoadWallpapersRecursive(const char *dir)
 {
     DIR *dp = opendir(dir);
     if (!dp)
@@ -385,33 +454,100 @@ static void LoadWallpapers(const char *dir)
         return;
     }
     struct dirent *entry;
-    while ((entry = readdir(dp)) != NULL && wallpaper_count < g_max_wallpapers)
+    while ((entry = readdir(dp)) != NULL)
     {
-        if (entry->d_type != DT_REG)
+        if (entry->d_name[0] == '.')
         {
             continue;
         }
-        const char *ext = strrchr(entry->d_name, '.');
-        if (!ext || (strcasecmp(ext, ".jpg") != 0 && strcasecmp(ext, ".jpeg") != 0 && strcasecmp(ext, ".png") != 0))
-        {
-            continue;
-        }
-
         char *fullpath;
         if (asprintf(&fullpath, "%s/%s", dir, entry->d_name) == -1) continue;
 
-        wallpapers[wallpaper_count] = (Wallpaper){
-            .path = strdup(fullpath),
-            .filename = strdup(entry->d_name),
-            .loaded = false,
-            .hoverAnim = 0.0f,
-            .animPos = {(float)GetRandomValue(-500, 500), (float)GetRandomValue(800, 1200)},
-            .animSize = {g_base_thumb_size, g_base_thumb_size}
-        };
-        atomic_store(&imagePending[wallpaper_count], false);
-        wallpaper_count++;
+        struct stat st;
+        if (stat(fullpath, &st) == 0)
+        {
+            if (S_ISDIR(st.st_mode))
+            {
+                LoadWallpapersRecursive(fullpath);
+                free(fullpath);
+                continue;
+            }
+            else if (S_ISREG(st.st_mode))
+            {
+                const char *ext = strrchr(entry->d_name, '.');
+                if (!ext || (strcasecmp(ext, ".jpg") != 0 && strcasecmp(ext, ".jpeg") != 0 && strcasecmp(ext, ".png") != 0
+                             && strcasecmp(ext, ".heic") != 0 && strcasecmp(ext, ".heif") != 0 && strcasecmp(ext, ".webp") != 0))
+                {
+                    free(fullpath);
+                    continue;
+                }
+                // Minimum resolution filter; load minimally to check size
+                bool largeEnough = true;
+                Image meta = {0};
+#ifdef __APPLE__
+                if (strcasecmp(ext, ".heic") == 0 || strcasecmp(ext, ".heif") == 0 || strcasecmp(ext, ".webp") == 0)
+                {
+                    char tmpMeta[4096];
+                    snprintf(tmpMeta, sizeof(tmpMeta), "/tmp/setwall_meta_%u.png", (unsigned int)rand());
+                    char cmd[8192];
+                    snprintf(cmd, sizeof(cmd), "sips -s format png %s --out %s >/dev/null 2>&1", fullpath, tmpMeta);
+                    if (system(cmd) == 0)
+                    {
+                        meta = LoadImage(tmpMeta);
+                        unlink(tmpMeta);
+                    }
+                }
+#endif
+                if (!meta.data)
+                {
+                    meta = LoadImage(fullpath);
+                }
+                if (meta.data)
+                {
+                    if (meta.width < g_min_width || meta.height < g_min_height)
+                    {
+                        largeEnough = false;
+                    }
+                    UnloadImage(meta);
+                }
+                if (!largeEnough)
+                {
+                    free(fullpath);
+                    continue;
+                }
+                if (wallpaper_count >= MAX_POSSIBLE_WALLPAPERS)
+                {
+                    LogMessage(LOG_WARNING, "Reached internal maximum of wallpapers (%d). Additional files will be ignored.", MAX_POSSIBLE_WALLPAPERS);
+                    free(fullpath);
+                    closedir(dp);
+                    return;
+                }
+                if (wallpaper_count >= g_max_wallpapers)
+                {
+                    free(fullpath);
+                    closedir(dp);
+                    return;
+                }
+                wallpapers[wallpaper_count] = (Wallpaper){
+                    .path = strdup(fullpath),
+                    .filename = strdup(entry->d_name),
+                    .loaded = false,
+                    .hoverAnim = 0.0f,
+                    .animPos = {(float)GetRandomValue(-500, 500), (float)GetRandomValue(800, 1200)},
+                    .animSize = {g_base_thumb_size, g_base_thumb_size}
+                };
+                atomic_store(&imagePending[wallpaper_count], false);
+                wallpaper_count++;
+            }
+        }
+        free(fullpath);
     }
     closedir(dp);
+}
+
+static void LoadWallpapers(const char *dir)
+{
+    LoadWallpapersRecursive(dir);
 }
 
 void LoadDefaultConfig()
@@ -428,7 +564,7 @@ void LoadDefaultConfig()
     g_keypressEffect = EFFECT_NONE;
     g_exitEffect = EFFECT_NONE;
 
-    g_max_wallpapers = 512;
+    g_max_wallpapers = 5000;
     g_base_thumb_size = 150;
     g_base_padding = 15;
     g_border_thickness_bloom = 3.0f;
@@ -438,6 +574,8 @@ void LoadDefaultConfig()
     g_particle_count = 50;
     g_ken_burns_duration = 15.0f;
     g_max_fps = 200;
+    g_min_width = 1024;
+    g_min_height = 768;
 
     g_win_width = 1280;
     g_win_height = 720;
@@ -456,9 +594,9 @@ char* trim_whitespace(char* str) {
 void ParseConfigFile()
 {
     char config_path[1024];
-    snprintf(config_path, sizeof(config_path), "%s/.config/hellpaper", get_home_dir());
+    snprintf(config_path, sizeof(config_path), "%s/.config/setwall", get_home_dir());
     mkdir(config_path, 0755);
-    snprintf(config_path, sizeof(config_path), "%s/.config/hellpaper/hellpaper.conf", get_home_dir());
+    snprintf(config_path, sizeof(config_path), "%s/.config/setwall/setwall.conf", get_home_dir());
 
     FILE *file = fopen(config_path, "r");
     if (!file) {
@@ -488,6 +626,8 @@ void ParseConfigFile()
             else if (strcmp(key, "text") == 0) sscanf(value, "%hhu, %hhu, %hhu, %hhu", &AppTheme.text.r, &AppTheme.text.g, &AppTheme.text.b, &AppTheme.text.a);
             
             else if (strcmp(key, "max_wallpapers") == 0) g_max_wallpapers = atoi(value);
+            else if (strcmp(key, "min_width") == 0) g_min_width = atoi(value);
+            else if (strcmp(key, "min_height") == 0) g_min_height = atoi(value);
             else if (strcmp(key, "base_thumb_size") == 0) g_base_thumb_size = atoi(value);
             else if (strcmp(key, "base_padding") == 0) g_base_padding = atoi(value);
             else if (strcmp(key, "border_thickness_bloom") == 0) g_border_thickness_bloom = atof(value);
@@ -503,13 +643,14 @@ void ParseConfigFile()
         }
     }
     fclose(file);
+    if (g_max_wallpapers > 5000) g_max_wallpapers = 5000;
 }
 
 void print_help()
 {
-    printf("Hellpaper - wallpaper picker for Linux.\n\n");
+    printf("Setwall - wallpaper picker for Linux and macOS.\n\n");
     printf("USAGE:\n");
-    printf("  hellpaper [OPTIONS] [PATH]\n\n");
+    printf("  setwall [OPTIONS] [PATH]\n\n");
     printf("ARGUMENTS:\n");
     printf("  [PATH]              Optional path to the directory containing wallpapers.\n");
     printf("                      Defaults to '~/Pictures/'.\n\n");
@@ -540,8 +681,8 @@ void print_help()
     printf("                        3: Vertical River\n");
     printf("                        4: Wave\n\n");
     printf("CONFIGURATION:\n");
-    printf("  Hellpaper can be fully customized by editing the configuration file located at:\n");
-    printf("  ~/.config/hellpaper/hellpaper.conf\n");
+    printf("  Setwall can be customized by editing the configuration file located at:\n");
+    printf("  ~/.config/setwall/setwall.conf\n");
 }
 
 void UpdateAndDrawScene(int filteredCount, int* filteredIndices, float delta, bool isPreviewing, bool isSearching)
@@ -633,11 +774,13 @@ void UpdateAndDrawScene(int filteredCount, int* filteredIndices, float delta, bo
         }
     }
 
-    for (int j = 0; j < filteredCount; j++)
+        for (int j = 0; j < filteredCount; j++)
     {
         if (j == highlighted_j) continue;
         int i = filteredIndices[j];
         Rectangle rect = {wallpapers[i].animPos.x, wallpapers[i].animPos.y, wallpapers[i].animSize.x, wallpapers[i].animSize.y};
+            // Virtualized drawing: skip if offscreen (with small margin)
+            if (rect.x + rect.width < -50 || rect.y + rect.height < -50 || rect.x > sw + 50 || rect.y > sh + 50) continue;
         DrawRectangleRounded(rect, 0.1f, 8, ColorLerp(AppTheme.idle, AppTheme.hover, wallpapers[i].hoverAnim));
         if (atomic_load(&wallpapers[i].loaded))
         {
@@ -653,6 +796,8 @@ void UpdateAndDrawScene(int filteredCount, int* filteredIndices, float delta, bo
     {
         int i = filteredIndices[highlighted_j];
         Rectangle rect = {wallpapers[i].animPos.x, wallpapers[i].animPos.y, wallpapers[i].animSize.x, wallpapers[i].animSize.y};
+            if (!(rect.x + rect.width < -50 || rect.y + rect.height < -50 || rect.x > sw + 50 || rect.y > sh + 50))
+            {
         if (!isPreviewing)
             DrawRectangleRounded(rect, 0.1f, 8, ColorLerp(AppTheme.idle, AppTheme.hover, wallpapers[i].hoverAnim));
         if (atomic_load(&wallpapers[i].loaded))
@@ -667,6 +812,7 @@ void UpdateAndDrawScene(int filteredCount, int* filteredIndices, float delta, bo
         float fontSize = 14.f * Clamp(masterScale, 0.8f, 1.5f);
         int textWidth = MeasureText(text, fontSize);
         DrawText(text, rect.x + (rect.width - textWidth) / 2, rect.y + rect.height + 5, fontSize, AppTheme.text);
+            }
     }
 
     if (previewAnim > 0.001f)
@@ -759,12 +905,12 @@ int main(int argc, char **argv)
 
     if (!wallpaper_path)
     {
-        snprintf(default_path, sizeof(default_path), "%s/Pictures", get_home_dir());
+        snprintf(default_path, sizeof(default_path), "%s/Pictures/Wallpaper", get_home_dir());
         wallpaper_path = default_path;
     }
     LoadWallpapers(wallpaper_path);
 
-    InitWindow(g_win_width, g_win_height, "Hellpaper");
+    InitWindow(g_win_width, g_win_height, "Setwall");
     SetExitKey(KEY_NULL);
     SetTargetFPS(g_max_fps);
 
@@ -840,7 +986,8 @@ int main(int argc, char **argv)
 
         bool isPreviewing = (preview_index != -1);
 
-        int filteredIndices[g_max_wallpapers];
+        int filteredIndicesCount = (wallpaper_count > 0) ? wallpaper_count : 1;
+        int filteredIndices[filteredIndicesCount];
         int filteredCount = 0;
         for (int i = 0; i < wallpaper_count; i++)
         {
@@ -889,6 +1036,10 @@ int main(int argc, char **argv)
             {
                 g_targetMode = key - KEY_ONE;
                 g_modeTransitionTimer = g_modeTransitionDuration;
+            }
+            // Apply mode toggle
+            if (IsKeyPressed(KEY_P)) {
+                g_applyMode = (g_applyMode == APPLY_ALL_DESKTOPS) ? APPLY_CURRENT_SPACE : APPLY_ALL_DESKTOPS;
             }
         }
 
@@ -994,11 +1145,41 @@ int main(int argc, char **argv)
         {
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) || IsKeyPressed(KEY_ENTER))
             {
-                isExiting = true;
                 TriggerParticleBurst(GetMousePosition());
                 printf("%s\n", print_filename_only ? wallpapers[g_hoveredIndex].filename : wallpapers[g_hoveredIndex].path);
                 fflush(stdout);
-                TriggerEffect(g_exitEffect, 1.5f);
+#ifdef __APPLE__
+                // Apply wallpaper on macOS
+                {
+                    char cmd[4096];
+                    const char *p = wallpapers[g_hoveredIndex].path;
+                    // Basic escape of double-quotes and backslashes for AppleScript
+                    char esc[3500];
+                    size_t ei = 0;
+                    for (size_t i = 0; p[i] && ei + 2 < sizeof(esc); i++)
+                    {
+                        if (p[i] == '"' || p[i] == '\\')
+                        {
+                            esc[ei++] = '\\';
+                        }
+                        esc[ei++] = p[i];
+                    }
+                    esc[ei] = '\0';
+                    if (g_applyMode == APPLY_ALL_DESKTOPS)
+                    {
+                        snprintf(cmd, sizeof(cmd),
+                            "osascript -e 'tell application \"System Events\" to set picture of every desktop to POSIX file \"%s\"'", esc);
+                    }
+                    else
+                    {
+                        snprintf(cmd, sizeof(cmd),
+                            "osascript -e 'tell application \"System Events\" to set picture of current desktop to POSIX file \"%s\"'", esc);
+                    }
+                    int _ = system(cmd);
+                    (void)_;
+                }
+#endif
+                TriggerEffect(g_keypressEffect, 0.6f);
             }
             if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsKeyPressed(KEY_LEFT_SHIFT))
             {
@@ -1021,9 +1202,7 @@ int main(int argc, char **argv)
             preview_index = -1;
         }
         
-        if (IsKeyPressed(KEY_ESCAPE) && !ateEscKey) {
-            break;
-        }
+        if (IsKeyPressed(KEY_ESCAPE) && !ateEscKey) { break; }
         
         g_smoothScrollY = Lerp(g_smoothScrollY, g_scroll.y, delta * g_anim_speed);
         g_smoothScrollX = Lerp(g_smoothScrollX, g_scroll.x, delta * g_anim_speed);
@@ -1057,14 +1236,20 @@ int main(int argc, char **argv)
         {
             ClearBackground(AppTheme.bg);
             UpdateAndDrawScene(filteredCount, filteredIndices, delta, isPreviewing, isSearching);
+            // Top overlay: image count and apply mode, plus search when active
+            DrawRectangle(0, 0, sw, 40, AppTheme.overlay);
+            DrawRectangleLines(0, 0, sw, 40, AppTheme.border);
+            char left[256];
+            const char* modeText = (g_applyMode == APPLY_ALL_DESKTOPS) ? "All Desktops" : "Current Space";
+            snprintf(left, sizeof(left), "Images: %d  |  Apply: %s  (P to toggle)", wallpaper_count, modeText);
+            DrawText(left, 10, 10, 20, AppTheme.text);
             if (isSearching || searchBufferCount > 0)
             {
-                DrawRectangle(0, 0, sw, 40, AppTheme.overlay);
-                DrawRectangleLines(0, 0, sw, 40, AppTheme.border);
                 char s[512];
                 snprintf(s, sizeof(s), "Search: %s", searchBuffer);
                 if (isSearching && fmod(GetTime(), 1.0) > 0.5) strcat(s, "|");
-                DrawText(s, 10, 10, 20, AppTheme.text);
+                int tw = MeasureText(s, 20);
+                DrawText(s, sw - tw - 10, 10, 20, AppTheme.text);
             }
         }
         EndTextureMode();
@@ -1128,7 +1313,7 @@ int main(int argc, char **argv)
             DrawTextureRec(mainTarget.texture, (Rectangle){0, 0, (float)sw, (float)-sh}, (Vector2){0, 0}, WHITE);
             EndShaderMode();
 
-            DrawText("Modes: 1-4 | Nav: HJKL/Arrows | Zoom: Ctrl+Scroll | Search: / | Preview: L-Shift/RMB | Select: Enter/LMB", 10, sh - 20, 10, AppTheme.text);
+            DrawText("Modes: 1-4 | Nav: HJKL/Arrows | Zoom: Ctrl+Scroll | Search: / | Preview: L-Shift/RMB | Select: Enter/LMB | P: Toggle Apply Mode", 10, sh - 20, 10, AppTheme.text);
         }
         EndDrawing();
     }

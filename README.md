@@ -1,12 +1,12 @@
-# Hellpaper
+# Setwall
 
 <p align="center">
     <img
       src="https://github.com/user-attachments/assets/29eb2060-3b3b-4bd1-b871-034a5493cec5"
-      alt="Preview of Hellpaper"
+      alt="Preview of Setwall"
       width="500"
     >
- <p align="center">A wallpaper picker for Linux, built with Raylib.</p>
+ <p align="center">A wallpaper picker for Linux and macOS, built with Raylib.</p>
 </p>
 
 ## "Features"
@@ -28,17 +28,24 @@ Just run:
 ```bash
 make
 ```
-This creates `hellpaper` executable. If you run `make install`, it will be installed in `/usr/local/bin`
+This creates `setwall` executable. If you run `make install`, it will be installed in `/usr/local/bin`
+
+On macOS (Homebrew):
+
+```bash
+brew install raylib pkg-config
+make           # or: make UNIVERSAL=1
+```
 
 ## Usage
 
 The basic command runs the picker, pointing it to a directory of images. Upon selection, it prints the full path of the chosen wallpaper to standard output.
 
 ```bash
-./hellpaper [OPTIONS] [PATH_TO_WALLPAPERS]
+./setwall [OPTIONS] [PATH_TO_WALLPAPERS]
 ```
 
-If no path is provided, it defaults to `~/Pictures/`.
+If no path is provided, it defaults to `~/Pictures/Wallpaper` (scans subfolders, ignores hidden files/folders).
 
 ### Options
 
@@ -48,6 +55,8 @@ If no path is provided, it defaults to `~/Pictures/`.
 | `--filename`          |          | Print only the filename to `stdout` instead of the full path.                 |
 | `--width `          | `<pixels>`  | Set the initial window width.                                                |
 | `--height`          | `<pixels>`  | Set the initial window height.                                               |
+| `--min_width`       | `<pixels>`  | Minimum image width to index (default 1024).                                 |
+| `--min_height`      | `<pixels>`  | Minimum image height to index (default 768).                                 |
 | `--startup-effect`  | `<name>` | Override the configured startup animation.                                      |
 | `--keypress-effect` | `<name>` | Override the configured key press animation.                                    |
 | `--exit-effect`     | `<name>` | Override the configured exit animation.                                         |
@@ -59,27 +68,29 @@ If no path is provided, it defaults to `~/Pictures/`.
 | **Mouse**                        | Hover over thumbnails to highlight them.                                |
 | **Mouse Wheel**                  | Scroll through the wallpaper list.                                      |
 | **Ctrl + Mouse Wheel**           | Zoom in/out, scaling the thumbnails.                                    |
-| **LMB (Left Click)**             | Select the highlighted wallpaper and exit.                              |
+| **LMB (Left Click)**             | Apply the highlighted wallpaper (does not exit).                        |
 | **RMB (Right Click)**            | Show a full-screen preview of the highlighted wallpaper.                |
 | **ESC**                          | Exit the program (or close the preview/search).                         |
 | `h` / `l` / **Left/Right Arrows**  | Highlight the previous/next wallpaper.                                  |
 | `k` / `j` / **Up/Down Arrows**     | Highlight the wallpaper above/below (Grid) or previous/next (other modes). |
 | `1`, `2`, `3`, `4`               | Switch between layout modes (Grid, H-River, V-River, Wave).             |
 | `/`                              | Enter search mode. Press Enter or ESC to exit search.                   |
-| **Enter**                        | Select the keyboard-highlighted wallpaper and exit.                     |
+| **Enter**                        | Apply the keyboard-highlighted wallpaper (does not exit).              |
 | **Left Shift**                   | Show a full-screen preview of the keyboard-highlighted wallpaper.       |
+| `P`                              | Toggle apply mode: All Desktops vs Current Space (macOS).              |
+| **ESC**                          | Exit the program (or close the preview/search).                         |
 
 ## Configuration
 
-Hellpaper is fully configurable via a plain text file located at:
-`~/.config/hellpaper/hellpaper.conf`
+Setwall is configurable via a plain text file located at:
+`~/.config/setwall/setwall.conf`
 
 The application will create the directory on first run if it doesn't exist. If the config file is not found, default values will be used.
 
-Here is a template `hellpaper.conf` with all available options:
+Here is a minimal template `setwall.conf`:
 
 ```ini
-# Hellpaper Configuration File
+# Setwall Configuration File
 # Lines starting with # or ; are comments.
 
 [Theme]
@@ -97,8 +108,8 @@ text = 202, 212, 241, 255
 width = 1280
 # Height
 height = 720
-# The maximum number of wallpapers to load from the directory.
-max_wallpapers = 512
+# Max images
+max_wallpapers = 5000
 # The base size of the square thumbnail images.
 base_thumb_size = 150
 # The base padding between thumbnails.
@@ -125,25 +136,25 @@ exit_effect = glitch
 
 ## Integration Examples
 
-You can pipe the output of `hellpaper` directly into your favorite wallpaper setting command.
+You can pipe the output of `setwall` directly into your favorite wallpaper setting command.
 
 ### Wayland Compositors
 
 ```bash
 # Select a wallpaper and immediately set it with swaybg
-swaybg -i "$(./hellpaper ~/Wallpapers)" -m fill
+swaybg -i "$(./setwall ~/Wallpapers)" -m fill
 ```
 
 ```bash
 # With swww
-swww img "$(./hellpaper ~/Pictures)"
+swww img "$(./setwall ~/Pictures)"
 ```
 
 ### For X11 (using feh)
 
 ```bash
 # Select a wallpaper and immediately set it with feh
-feh --bg-fill "$(./hellpaper_x11 ~/Wallpapers)"
+feh --bg-fill "$(./setwall ~/Wallpapers)"
 ```
 
 ### In a Shell Script
@@ -155,7 +166,7 @@ You can create a simple script to make this even easier.
 #!/usr/bin/env sh
 
 WALLPAPER_DIR=~/Pictures/
-SELECTED_WALL=$(./hellpaper "$WALLPAPER_DIR")
+SELECTED_WALL=$(./setwall "$WALLPAPER_DIR")
 
 # Exit if no wallpaper was selected (e.g., user pressed ESC)
 if [ -z "$SELECTED_WALL" ]; then
@@ -168,11 +179,11 @@ swww img "$SELECTED_WALL"
 
 ## Hellwal Integration
 
-Since I also created [hellwal](https://github.com/danihek/hellwal), I thought it would be nice to use colors from hellwal in **hellpaper** so here is a template, and example "**setwallpaper**" script:
+Since I also created [hellwal](https://github.com/danihek/hellwal), I thought it would be nice to use colors from hellwal in **setwall** so here is a template, and example "**setwallpaper**" script:
 
-**`hellpaper.conf`**
+**`setwall.conf`**
 ```ini
-# Hellpaper Hellwal template config
+# Setwall Hellwal template config
 [Theme]
 bg = %% color0.rgb %%, 255
 idle = %% color1.rgb %%, 255
@@ -200,7 +211,7 @@ exit_effect = collapse
 #!/usr/bin/env sh
 
 WALLPAPER_DIR=~/Pictures/
-SELECTED_WALL=$(./hellpaper "$WALLPAPER_DIR")
+SELECTED_WALL=$(./setwall "$WALLPAPER_DIR")
 
 if [ -z "$SELECTED_WALL" ]; then
     echo "No wallpaper selected."
@@ -216,8 +227,8 @@ source ~/.cache/hellwal/variables.sh
 # Set wallpaper using swww
 swww img $SELECTED_WALL
 
-# Set colors for Hellpaper
-cp ~/.cache/hellwal/hellpaper.conf ~/.config/hellpaper/hellpaper.conf
+# Set colors for Setwall
+cp ~/.cache/hellwal/setwall.conf ~/.config/setwall/setwall.conf
 
 # Set colors for rofi
 cp ~/.cache/hellwal/rofi.rasi ~/.config/rofi/config.rasi
