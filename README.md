@@ -6,7 +6,7 @@
       alt="Preview of Setwall"
       width="500"
     >
- <p align="center">A wallpaper picker for Linux and macOS, built with Raylib.</p>
+ <p align="center">A wallpaper picker for MacOS, built with Raylib.</p>
 </p>
 
 ## "Features"
@@ -134,105 +134,3 @@ keypress_effect = none
 exit_effect = glitch
 ```
 
-## Integration Examples
-
-You can pipe the output of `setwall` directly into your favorite wallpaper setting command.
-
-### Wayland Compositors
-
-```bash
-# Select a wallpaper and immediately set it with swaybg
-swaybg -i "$(./setwall ~/Wallpapers)" -m fill
-```
-
-```bash
-# With swww
-swww img "$(./setwall ~/Pictures)"
-```
-
-### For X11 (using feh)
-
-```bash
-# Select a wallpaper and immediately set it with feh
-feh --bg-fill "$(./setwall ~/Wallpapers)"
-```
-
-### In a Shell Script
-
-You can create a simple script to make this even easier.
-
-**`setwall.sh`**
-```bash
-#!/usr/bin/env sh
-
-WALLPAPER_DIR=~/Pictures/
-SELECTED_WALL=$(./setwall "$WALLPAPER_DIR")
-
-# Exit if no wallpaper was selected (e.g., user pressed ESC)
-if [ -z "$SELECTED_WALL" ]; then
-    echo "No wallpaper selected."
-    exit 1
-fi
-
-swww img "$SELECTED_WALL"
-```
-
-## Hellwal Integration
-
-Since I also created [hellwal](https://github.com/danihek/hellwal), I thought it would be nice to use colors from hellwal in **setwall** so here is a template, and example "**setwallpaper**" script:
-
-**`setwall.conf`**
-```ini
-# Setwall Hellwal template config
-[Theme]
-bg = %% color0.rgb %%, 255
-idle = %% color1.rgb %%, 255
-hover = %% color15.rgb %%, 255
-border = %% color7.rgb %%, 255
-ripple = %% color4.rgb %%, 255
-text = %% color14.rgb %%, 255
-
-[Settings]
-base_thumb_size = 120
-base_padding = 10
-anim_speed = 20.0
-particle_count = 100
-max_fps = 200
-
-[Effects]
-# Valid effects: none, glitch, blur, pixelate, shake, collapse, reveal
-startup_effect = blur
-keypress_effect = none
-exit_effect = collapse
-```
-
-**`setwallpaper.sh`**
-```bash
-#!/usr/bin/env sh
-
-WALLPAPER_DIR=~/Pictures/
-SELECTED_WALL=$(./setwall "$WALLPAPER_DIR")
-
-if [ -z "$SELECTED_WALL" ]; then
-    echo "No wallpaper selected."
-    exit 1
-fi
-
-# Generate colors from wallpaper
-hellwal -i "$SELECTED_WALL" --neon-mode
-
-# Fetch variables
-source ~/.cache/hellwal/variables.sh
-
-# Set wallpaper using swww
-swww img $SELECTED_WALL
-
-# Set colors for Setwall
-cp ~/.cache/hellwal/setwall.conf ~/.config/setwall/setwall.conf
-
-# Set colors for rofi
-cp ~/.cache/hellwal/rofi.rasi ~/.config/rofi/config.rasi
-
-# ... accordingly for other apps
-
-```
